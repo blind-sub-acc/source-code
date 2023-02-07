@@ -1,0 +1,365 @@
+"""
+    Privacy-Preserving Protocol for Approximating the Kindey Exchange Problem
+"""
+
+from Compiler.types import sint, cint, regint, Array, MemValue, Matrix
+from Compiler.library import print_ln, do_while, for_range, if_, print_str, else_, for_range_parallel
+from Compiler.networking import write_output_to_clients, close_connections, setup_client_connections
+from Compiler.util import if_else
+from Compiler.comp_gate import compute_comp_matrix, read_input, compute_prio_matrix, read_prio_input
+from Compiler.library import time, start_timer, stop_timer
+from Compiler.oram import demux_array
+
+import math
+from itertools import combinations
+
+program.use_edabit(True)
+
+DEBUG=True
+
+PORT_NUM = 14000
+
+NUM_NODES = 3
+MAX_CYCLE_SIZE = 3
+MAX_CYCLES_PER_SUBSET = 2
+S_LENGTH = 4
+S_LENGTH_TWO = 3
+S_LENGTH_THREE = 1
+
+Superset = tuple(range(0, NUM_NODES))
+S = [list(s) for i in range(2, MAX_CYCLE_SIZE + 1) for s in combinations(Superset, i)]  # All possible subsets
+
+for s in S:
+    while len(s) < MAX_CYCLE_SIZE:
+        s.append(NUM_NODES)
+
+###### HELPER FUNCTIONS ######
+
+def create_subsets():
+    subsets = Matrix(S_LENGTH, MAX_CYCLE_SIZE, cint)
+    counter = Array(1, cint)
+    counter[0] = regint(0)
+
+    @for_range(NUM_NODES)
+    def _(i):
+        @for_range(NUM_NODES)
+        def _(j):
+            @if_(j > i)
+            def _():
+                subsets[counter[0]][0] = i
+                subsets[counter[0]][1] = j
+                subsets[counter[0]][2] = NUM_NODES
+                counter[0] = counter[0] + 1
+    @for_range(NUM_NODES)
+    def _(i):
+        @for_range(NUM_NODES)
+        def _(j):
+            @if_(j > i)
+            def _():
+                @for_range(NUM_NODES)
+                def _(k):
+                    @if_(k > j)
+                    def _():
+                        subsets[counter[0]][0] = i
+                        subsets[counter[0]][1] = j
+                        subsets[counter[0]][2] = k
+                        counter[0] = counter[0] + 1
+
+    return subsets
+
+def print_matrix(matrix, rows, cols):
+    @for_range(rows)
+    def _(i):
+        @for_range(cols)
+        def _(j):
+            print_str("%s ", matrix[i][j].reveal())
+
+        print_ln(" ")
+
+def get_binary_indicator(value, n):
+    bit_decomposition = value.bit_decompose(n.bit_length())
+    return demux_array(bit_decomposition)
+
+
+###### IMPLEMENTATION OF THE DIFFERENT PHASES OF THE PROTOCOL ######
+
+def setup_phase(adj_matrix, prio_matrix):
+    """
+    Compute the weight for each subset and store the corresponding cycle of maximum weight for each subset.
+    """
+    potential_subsets = Array(S_LENGTH, sint)
+    potential_subsets.assign_all(0)
+
+    # A subset {u, v, w} of size 3 can yield a maximum of two different cycles, i.e., (u, v, w) and (u, w, v)
+    mapping = Matrix(S_LENGTH, MAX_CYCLES_PER_SUBSET, sint)
+
+    # The weight of a cycles is computed in two parts. First, we determine if the cycle is executable given the current
+    # compatibility graph, i.e., we compute the product of the entries for each edge in the adjacency matrix. Then, we
+    # multiply this product with the actual weight of the cycle which corresponds to the sum of the entries for its
+    # edges in the prioritization matrix.
+    @for_range_parallel(S_LENGTH_TWO, S_LENGTH_TWO)
+    def _(i):
+        u, v, w = S[i]
+        mapping[i][0] = adj_matrix[u][v] * adj_matrix[v][u]
+        # a subset of size two can only yield one cycle; thus, we set the mapping for the second cycle to 0
+        mapping[i][1] = sint(0)
+        potential_subsets[i] = mapping[i][0] * (prio_matrix[u][v] + prio_matrix[v][u])
+
+    # The weight computation for a cycle of size three is analogous to the computation for a cycle of size two. However,
+    # for cycles of size three, there are two different cycles per subset. We always choose the cycle of larger weight.
+    @for_range_parallel(S_LENGTH_THREE, S_LENGTH_THREE)
+    def _(i):
+        u, v, w = S[i + S_LENGTH_TWO]
+        first =  adj_matrix[u][v] * adj_matrix[v][w] * adj_matrix[w][u]
+        prio_first = first * (prio_matrix[u][v] + prio_matrix[v][w] + prio_matrix[w][u])
+        second = adj_matrix[u][w] * adj_matrix[w][v] * adj_matrix[v][u]
+        prio_second = second * (prio_matrix[u][w] + prio_matrix[w][v] + prio_matrix[v][u])
+        choose_first = prio_first >= prio_second
+        mapping[i + S_LENGTH_TWO][0] = if_else(choose_first, first, sint(0))
+        mapping[i + S_LENGTH_TWO][1] = if_else(choose_first, sint(0), second)
+        potential_subsets[i + S_LENGTH_TWO] = if_else(choose_first, prio_first, prio_second)
+
+    return potential_subsets, mapping
+
+
+def max_weight_set(n, indices, nodes, weights):
+    """
+    Set of n subsets encoded by a secret vector of subset indices, a secret matrix encoding the nodes of each subset,
+    and a secret vector storing the weight of each subset.
+    Returns the secret index of the first subset of maximum weight and the corresponding nodes of the chosen subset. If
+    there is no subset of weight larger than 0, the dummy index S_LENGTH with the dummy nodes (NUM_NODES, NUM_NODES,
+    NUM_NODES) is returned.
+    The gate uses a recursive tree reduction approach to save communication rounds.
+    """
+    # if the set only contains a single subset, we know that we have found a subset of maximum weight
+    if n == 1:
+        valid = weights[0] > 0
+        index = valid.if_else(indices[0], S_LENGTH)
+        u = valid.if_else(nodes[0][0], NUM_NODES)
+        v = valid.if_else(nodes[0][1], NUM_NODES)
+        w = valid.if_else(nodes[0][2], NUM_NODES)
+        return index, u, v, w
+
+    # initialize the data structures for the new set of subsets which has only half of the size of the current set
+    n_prime = math.ceil(n / 2)
+    indices_prime = Array(n_prime, sint)
+    nodes_prime = Matrix(n_prime, 3, sint)
+    weights_prime = Array(n_prime, sint)
+
+    # in each iteration, we compare two neighboring subsets and store the subset of larger weight
+    iterations = math.floor(n / 2)
+    @for_range_parallel(iterations, iterations)
+    def _(i):
+        select_first = weights[2 * i] >= weights[2 * i + 1]
+        indices_prime[i] = if_else(select_first, indices[2 * i], indices[2 * i + 1])
+        nodes_prime[i][0] = if_else(select_first, nodes[2 * i][0], nodes[2 * i + 1][0])
+        nodes_prime[i][1] = if_else(select_first, nodes[2 * i][1], nodes[2 * i + 1][1])
+        nodes_prime[i][2] = if_else(select_first, nodes[2 * i][2], nodes[2 * i + 1][2])
+        weights_prime[i] = if_else(select_first, weights[2 * i], weights[2 * i + 1])
+
+    # if the current set of subsets is of odd size, we just store the last entry of the current set as the last entry
+    # of the new set
+    if n_prime > iterations:
+        indices_prime[n_prime - 1] = indices[n - 1]
+        nodes_prime[n_prime - 1] = nodes[n - 1]
+        weights_prime[n_prime - 1] = weights[n - 1]
+
+    return max_weight_set(n_prime, indices_prime, nodes_prime, weights_prime)
+
+
+def resolution_phase(chosen_sets, mapping, subset_indices_to_vertices):
+    """
+    Transform the vector of chosen subsets into a solution matrix where each entry solution_matrix[i][j] encodes
+    whether the donor of patient-donor pair i donates a kidney to the patient of pair j.
+    """
+    solution_matrix = Matrix(NUM_NODES, NUM_NODES, sint)
+    solution_matrix.assign_all(0)
+
+    # y[i][j] indicates whether cycle C[i][j] with vertex set V(C[i][j]) = S[i] is among the chosen exchange cycles.
+    # This is the case iff chosen_sets = 1 (set S[i] is chosen) and mapping[i][j] = 1 (cycle C[i][j] is chosen).
+
+    y = Matrix(S_LENGTH, MAX_CYCLES_PER_SUBSET, sint)
+
+    @for_range_parallel(S_LENGTH, S_LENGTH)
+    def _(k):
+        @for_range_parallel(MAX_CYCLES_PER_SUBSET, MAX_CYCLES_PER_SUBSET)
+        def _(l):
+            y[k][l] = chosen_sets[k] * mapping[k][l]
+
+    # Transform the chosen exchange cycles (with y[i][j] = 1) into the edges that make up the exchange.
+    @for_range_parallel(S_LENGTH_TWO, S_LENGTH_TWO)
+    def _(s):
+        u, v, w = S[s]
+        solution_matrix[u][v] = solution_matrix[u][v] + y[s][0]
+        solution_matrix[v][u] = solution_matrix[v][u] + y[s][0]
+
+    @for_range(S_LENGTH_THREE)
+    def _(s):
+        u, v, w = subset_indices_to_vertices[s + S_LENGTH_TWO]
+        # CYCLE (u, v, w)
+        solution_matrix[u][v] = solution_matrix[u][v] + y[s + S_LENGTH_TWO][0]
+        solution_matrix[v][w] = solution_matrix[v][w] + y[s + S_LENGTH_TWO][0]
+        solution_matrix[w][u] = solution_matrix[w][u] + y[s + S_LENGTH_TWO][0]
+        # CYCLE (u, w, v)
+        solution_matrix[u][w] = solution_matrix[u][w] + y[s + S_LENGTH_TWO][1]
+        solution_matrix[w][v] = solution_matrix[w][v] + y[s + S_LENGTH_TWO][1]
+        solution_matrix[v][u] = solution_matrix[v][u] + y[s + S_LENGTH_TWO][1]
+
+    return solution_matrix
+
+
+def decryption_phase(solution_matrix):
+    """
+    Perform the mapping from the solution matrix to the exchange partners of each patient-donor pair.
+    """
+
+    donors = Array(NUM_NODES, sint)
+    recipients = Array(NUM_NODES, sint)
+
+    donor = Array(1, sint)
+    recipient = Array(1, sint)
+
+    @for_range(NUM_NODES)
+    def _(i):
+        donor[0] = sint(0)
+        recipient[0] = sint(0)
+
+        @for_range(NUM_NODES)
+        def _(j):
+            donor[0] = donor[0] + (j + 1) * solution_matrix[j][i]
+            recipient[0] = recipient[0] + (j + 1) * solution_matrix[i][j]
+
+        donors[i] = donor[0]
+        recipients[i] = recipient[0]
+
+    return donors, recipients
+
+
+###### MAIN PROTOCOL ######
+
+def main():
+    """
+    First receive the input of all input peers. Then start with the execution of the actual kidney exchange protocol.
+    """
+    number_clients, client_sockets = setup_client_connections(PORT_NUM, NUM_NODES)
+
+    # PRE-COMPUTATION PHASE
+    # Create a mapping from the subset index to the vertices of the subset.
+    subset_index_to_vertices = create_subsets()
+
+    # Initialize the vector of subset indices and the matrix of nodes for each subset.
+    subset_indices = Array(S_LENGTH, cint)
+    subset_nodes = Matrix(S_LENGTH, 3, cint)
+    @for_range_parallel(S_LENGTH, S_LENGTH)
+    def _(s):
+        subset_indices[s] = cint(s)
+        u, v, w = S[s]
+        subset_nodes[s][0] = cint(u)
+        subset_nodes[s][1] = cint(v)
+        subset_nodes[s][2] = cint(w)
+
+    # Start of protocol KEP_AP
+    print_ln("Start Time")
+    time()
+
+    # Obtain input for construction of adjacency matrix and prioritization matrix from the patient-donor pairs.
+    start_timer(1)
+    blood_donor, blood_patient, antigen_donor, antigen_patient = read_input(NUM_NODES)
+    prescores, patient_antigens, donor_antigens, patient_bloodtype, donor_bloodtype, patient_age, donor_age, patient_region, donor_region = read_prio_input(NUM_NODES)
+    stop_timer(1)
+
+    # CONSTRUCTION PHASE
+    start_timer(2)
+    adjacency_matrix = compute_comp_matrix(blood_donor, blood_patient, antigen_donor, antigen_patient, NUM_NODES)
+    prio_matrix = compute_prio_matrix(prescores, patient_antigens, donor_antigens, patient_bloodtype,
+                                      donor_bloodtype, patient_age, donor_age, patient_region, donor_region, NUM_NODES)
+    if DEBUG:
+        print_ln("Adjacency Matrix:")
+        print_matrix(adjacency_matrix, NUM_NODES, NUM_NODES)
+        print_ln("Prioritization Matrix:")
+        print_matrix(prio_matrix, NUM_NODES, NUM_NODES)
+    stop_timer(2)
+
+    # Shuffle the adjacency matrix and the prioritization matrix.
+    start_timer(3)
+    permutation = sint.get_secure_shuffle(NUM_NODES)
+    adjacency_matrix.secure_permute(permutation)
+    adjacency_matrix = adjacency_matrix.transpose()
+    adjacency_matrix.secure_permute(permutation)
+    adjacency_matrix = adjacency_matrix.transpose()
+
+    prio_matrix.secure_permute(permutation)
+    prio_matrix = prio_matrix.transpose()
+    prio_matrix.secure_permute(permutation)
+    prio_matrix = prio_matrix.transpose()
+    stop_timer(3)
+
+    # EVALUATION PHASE
+    start_timer(4)
+    # Initially no subset is chosen; so we set all entries of chosen_subsets to 0.
+    chosen_subsets = Array(S_LENGTH, sint)
+    chosen_subsets.assign_all(0)
+    subset_weights, mapping = setup_phase(adjacency_matrix, prio_matrix)
+    stop_timer(4)
+
+    # OPTIMIZATION PHASE
+    start_timer(5)
+    # We have to execute NUM_NODES/2 iterations as in each iteration at least one subset of size 2 is chosen as
+    # long as there is a subset of weight larger than 0. Thus, NUM_NODES/2 is the worst case number of iterations
+    # that can be required. Executing dummy iterations even if there is no longer a subset of weight larger than 0
+    # makes our protocol entirely data oblivious.
+    @for_range(NUM_NODES // 2)
+    def _(iteration):
+        chosen_subset, u, v, w = max_weight_set(S_LENGTH, subset_indices, subset_nodes, subset_weights)
+
+        # Compute the binary indicator vectors for the obtained index of the maximum weight subset and its nodes.
+        # If there was no subset of weight larger than 0, the index will be S_LENGTH (resp. NUM_NODES) and thus the
+        # computed binary indicator will contain only 0's.
+        indicator_subset = get_binary_indicator(chosen_subset, S_LENGTH)
+        indicator_u = get_binary_indicator(u, NUM_NODES)
+        indicator_v = get_binary_indicator(v, NUM_NODES)
+        indicator_w = get_binary_indicator(w, NUM_NODES)
+
+        chosen_subsets[:S_LENGTH] = chosen_subsets[:S_LENGTH] + indicator_subset[:S_LENGTH]
+
+        @if_(iteration < NUM_NODES // 2 - 1)
+        def _():
+            # Obtain the combined indicator for the chosen subset; only include the indicator for the node w, if
+            # the chosen subset is of size 3.
+            comb_indicator = indicator_u + indicator_v + (1 - indicator_w[NUM_NODES]) * indicator_w
+            # Set the weight of all subsets that share a node with the chosen subset to 0.
+            @for_range_parallel(S_LENGTH, S_LENGTH)
+            def _(s):
+                a, b, c = S[s]
+                subset_weights[s] *= (1 - comb_indicator[a]) * (1 - comb_indicator[b]) * (1 - comb_indicator[c])
+
+    stop_timer(5)
+
+    # RESOLUTION PHASE
+    start_timer(6)
+    solution_matrix = resolution_phase(chosen_subsets, mapping, subset_index_to_vertices)
+    stop_timer(6)
+
+    # Revert the initial shuffling of the adjacency matrix.
+    start_timer(7)
+    solution_matrix.secure_permute(permutation, reverse=True)
+    solution_matrix = solution_matrix.transpose()
+    solution_matrix.secure_permute(permutation, reverse=True)
+    solution_matrix = solution_matrix.transpose()
+
+    donors, recipients = decryption_phase(solution_matrix)
+    stop_timer(7)
+
+    start_timer(8)
+    # Provide the patient-donor pairs with their exchange partners.
+    write_output_to_clients(client_sockets, number_clients, donors)
+    write_output_to_clients(client_sockets, number_clients, recipients)
+    stop_timer(8)
+
+    print_ln("End Time")
+    time()
+
+    close_connections(NUM_NODES)
+
+
+main()

@@ -1,0 +1,4 @@
+./smpc_protocols/Inputs > ./MPSPDZ/ExternalIO/Inputs
+./smpc_protocols/Compiler/comp_gate.py > ./MPSPDZ/Compiler/comp_gate.py
+./smpc_protocols/Compiler/networking.py > ./MPSPDZ/Compiler/networking.py
+./smpc_protocols/kidney-exchange-client.py > ./MPSPDZ/ExternalIO/kidney-exchange-client.py
