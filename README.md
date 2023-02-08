@@ -4,8 +4,15 @@ The source code of the protocol KEP_AP is available in the file `smpc_protocols/
 
 The two scripts `setup_mpspdz.py` and `run_kep_ap.py` can be used to setup MP-SPDZ and run an example execution of the protocol.
 
+## Setup
 
-## Setup of MP-SPDZ
+### Python Requirements
+- Tested for Python 3.10
+- Packages listed in requirements.txt: `pip install -r requirements.txt`
+
+The assumption in this file is that python is installed as `python` and pip as `pip`.
+
+### Setup of MP-SPDZ
 Our protocol is implemented using the secure multi-party computation benchmarking framework [MP-SPDZ](https://github.com/data61/MP-SPDZ). 
 The requirements for MP-SPDZ are stated in the corresponding README file of MP-SPDZ: https://github.com/data61/MP-SPDZ/blob/v0.3.3/README.md.
 

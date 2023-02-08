@@ -12,7 +12,7 @@ BATCHSIZE = "10000"
 
 WARNING_COLOR = "\033[92m"
 END_COLOR = "\033[0m"
-OUTPUT_COLORS = ["\033[92m", "\033[94m", "\033[95m", "\033[96m", "\033[91m"]
+OUTPUT_COLORS = ["\033[94m", "\033[95m", "\033[96m", "\033[91m"]
 
 
 def execute(cmd, currwd, prnt):
@@ -165,13 +165,13 @@ def run(clients):
     popen_first = subprocess.Popen(
         ["../MPSPDZ/" + str(PROTOCOL), "-b", BATCHSIZE, "-h",
          "localhost", "0", PROGRAM],
-        stdout=subprocess.PIPE, cwd="./smpc_protocols", universal_newlines=True)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="./smpc_protocols", universal_newlines=True)
 
     for i in range(1, COMPUTING_PEERS):
         subprocess.Popen(
             ["../MPSPDZ/" + str(PROTOCOL), "-b", BATCHSIZE, "-h",
              "localhost", str(i),
-             PROGRAM], stdout=subprocess.DEVNULL, cwd="./smpc_protocols", universal_newlines=True)
+             PROGRAM], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd="./smpc_protocols", universal_newlines=True)
 
     # start sending the input of the patient-donor pairs
     popen_clients = []
@@ -193,7 +193,7 @@ def run(clients):
 
     for i in range(len(popen_clients)):
         for line in popen_clients[i].stdout:
-            print(f"{OUTPUT_COLORS[i%5]}{line}{END_COLOR}", end='')
+            print(f"{OUTPUT_COLORS[i%4]}{line}{END_COLOR}", end='')
 
 
 def main():
